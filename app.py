@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
-import os, re, json, binascii, base64, hashlib
+import argparse, requests, os, re, json, binascii, base64, hashlib, traceback
 
-import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from mutagen import mp3, flac, id3
 
-key = binascii.a2b_hex('2331346C6A6B5F215C5D2630553C2728')
-headers = { 'X-Real-IP': '211.161.244.70', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36' }
 
 def parse(uri):
+    """ 从链接或文件地址获得元数据 """
     if 'event' in uri:
         id = re.search(r'id=(\d+)', uri).group(1)
         uid = re.search(r'uid=(\d+)', uri).group(1)
-        response = requests.get('https://music.163.com/event', params = { 'id': id, 'uid': uid }, headers = headers)
+        response = requests.get('https://music.163.com/event', params={'id': id, 'uid': uid}, headers=headers)
         data = re.search(r'<textarea.+id="event-data".*>([\s\S]+?)</textarea>', response.text).group(1)
         data = json.loads(data.replace('&quot;', '"'))
         data = json.loads(data['json'])
@@ -29,7 +27,7 @@ def parse(uri):
                 return json.loads(data['resource']['resourceInfo'])
     elif 'album' in uri:
         id = re.search(r'id=(\d+)', uri).group(1)
-        response = requests.get('https://music.163.com/api/album/' + id, headers = headers)
+        response = requests.get('https://music.163.com/api/album/' + id, headers=headers)
         data = json.loads(response.text)
         return {
             'album': data['album'],
@@ -37,7 +35,7 @@ def parse(uri):
         }
     elif 'song' in uri:
         id = re.search(r'id=(\d+)', uri).group(1)
-        response = requests.get('https://music.163.com/api/song/detail?ids=[' + id + ']', headers = headers)
+        response = requests.get('https://music.163.com/api/song/detail?ids=[' + id + ']', headers=headers)
         data = json.loads(response.text)
         return data['songs'][0]
     elif os.path.exists(uri):
@@ -48,10 +46,13 @@ def parse(uri):
                 'id': data['albumId'],
                 'picUrl': data['albumPic']
             },
-            'artists': [{ 'name': artist[0], 'id': artist[1] } for artist in data['artist']]
+            'artists': [{'name': artist[0], 'id': artist[1]} for artist in data['artist']]
         }
 
-def mark(path, song, id = None):
+
+def mark(path, song):
+    """ 由元数据生成标记并写入文件 """
+
     def streamify(file):
         with file:
             return file.read()
@@ -69,7 +70,9 @@ def mark(path, song, id = None):
         'album': song['album']['name'],
         'albumId': song['album']['id'],
         'albumPic': song['album']['picUrl'],
-        'albumPicDocId': str(song['album']['pic'] if 'pic' in song['album'] else re.search(r'/(\d+)\.\w+$', song['album']['picUrl']).group(1)),
+        'albumPicDocId': str(song['album']['pic'] if 'pic' in song['album'] else re.search(r'/(\d+)\.\w+$',
+                                                                                           song['album'][
+                                                                                               'picUrl']).group(1)),
         'alias': song['alias'] if 'alias' in song else [],
         'artist': [[artist['name'], artist['id']] for artist in song['artists']],
         'musicId': id if id else song['id'],
@@ -84,7 +87,8 @@ def mark(path, song, id = None):
 
     cryptor = AES.new(key, AES.MODE_ECB)
     identifier = 'music:' + json.dumps(meta)
-    identifier = '163 key(Don\'t modify):' + base64.b64encode(cryptor.encrypt(pad(identifier.encode('utf8'), 16))).decode('utf8')
+    identifier = '163 key(Don\'t modify):' + base64.b64encode(
+        cryptor.encrypt(pad(identifier.encode('utf8'), 16))).decode('utf8')
 
     audio.delete()
     audio['title'] = meta['musicName']
@@ -96,7 +100,6 @@ def mark(path, song, id = None):
     else:
         audio.tags.RegisterTextKey('comment', 'COMM')
         audio['comment'] = identifier
-    audio.save()
 
     data = requests.get(meta['albumPic'] + '?param=300y300').content
     if format == 'flac':
@@ -110,18 +113,63 @@ def mark(path, song, id = None):
         image = id3.APIC()
         embed(image, data, 6)
         audio.tags.add(image)
-    audio.save()
+
+    if save_path:
+        fname = '{} - {}.{}'.format(','.join([artist[0] for artist in meta['artist']][:3]), audio['title'], format)
+        path = os.path.join(save_path, fname)
+    audio.save(path)
+
 
 def extract(path):
+    """ 从文件读取标记内容 """
     if open(path, 'rb').read(4) == binascii.a2b_hex('664C6143'):
         audio = flac.FLAC(path)
         identifier = audio['description']
     else:
         audio = mp3.MP3(path)
         identifier = [text for item in audio.tags.getall('COMM') for text in item.text]
-    identifier = max(identifier, key = len)
+    identifier = max(identifier, key=len)
 
     identifier = base64.b64decode(identifier[22:])
     cryptor = AES.new(key, AES.MODE_ECB)
     meta = unpad(cryptor.decrypt(identifier), 16).decode('utf8')
+    print(json.dumps(json.loads(meta[6:]), ensure_ascii=False, indent=4))
     return json.loads(meta[6:])
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='163marker')
+    parser.add_argument('file', metavar='file', help='audio file path (MP3/FLAC)')
+    parser.add_argument('uri', metavar='uri', nargs='?', help='meta data source (URL/PATH)')
+
+    args = parser.parse_args()
+    if args.uri:
+        mark(args.file, parse(args.uri))
+    else:
+        extract(args.file)
+
+
+def worker():
+    load_dir = ''  # 需要marker的文件夹路径
+
+    marker_dict = {
+        'file1': 'uri1',
+    }
+
+    for f, u in marker_dict.items():
+        try:
+            mark(os.path.join(load_dir, f), parse(u))
+            print(f, '成功')
+        except:
+            print(f, '\033[31m失败')
+            traceback.print_exc()
+
+
+if __name__ == '__main__':
+    key = binascii.a2b_hex('2331346C6A6B5F215C5D2630553C2728')
+    headers = {'X-Real-IP': '211.161.244.70',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'}
+    save_path = ''  # 新文件保存地址，为空默认修改原文件
+
+    worker()
+    # main()
