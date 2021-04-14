@@ -7,7 +7,6 @@ from mutagen import mp3, flac, id3
 
 
 def parse(uri):
-    """ 从链接或文件地址获得元数据 """
     if 'event' in uri:
         id = re.search(r'id=(\d+)', uri).group(1)
         uid = re.search(r'uid=(\d+)', uri).group(1)
@@ -50,9 +49,7 @@ def parse(uri):
         }
 
 
-def mark(path, song):
-    """ 由元数据生成标记并写入文件 """
-
+def mark(path, song, id=None):
     def streamify(file):
         with file:
             return file.read()
@@ -100,6 +97,7 @@ def mark(path, song):
     else:
         audio.tags.RegisterTextKey('comment', 'COMM')
         audio['comment'] = identifier
+    audio.save()
 
     data = requests.get(meta['albumPic'] + '?param=300y300').content
     if format == 'flac':
@@ -113,15 +111,10 @@ def mark(path, song):
         image = id3.APIC()
         embed(image, data, 6)
         audio.tags.add(image)
-
-    if save_path:
-        fname = '{} - {}.{}'.format(','.join([artist[0] for artist in meta['artist']][:3]), audio['title'], format)
-        path = os.path.join(save_path, fname)
-    audio.save(path)
+    audio.save()
 
 
 def extract(path):
-    """ 从文件读取标记内容 """
     if open(path, 'rb').read(4) == binascii.a2b_hex('664C6143'):
         audio = flac.FLAC(path)
         identifier = audio['description']
@@ -133,7 +126,6 @@ def extract(path):
     identifier = base64.b64decode(identifier[22:])
     cryptor = AES.new(key, AES.MODE_ECB)
     meta = unpad(cryptor.decrypt(identifier), 16).decode('utf8')
-    print(json.dumps(json.loads(meta[6:]), ensure_ascii=False, indent=4))
     return json.loads(meta[6:])
 
 
@@ -141,10 +133,11 @@ def main():
     parser = argparse.ArgumentParser(prog='163marker')
     parser.add_argument('file', metavar='file', help='audio file path (MP3/FLAC)')
     parser.add_argument('uri', metavar='uri', nargs='?', help='meta data source (URL/PATH)')
+    parser.add_argument('id', metavar='id', nargs='?', help='specific song id')
 
     args = parser.parse_args()
     if args.uri:
-        mark(args.file, parse(args.uri))
+        mark(args.file, parse(args.uri), args.id)
     else:
         extract(args.file)
 
@@ -169,7 +162,6 @@ if __name__ == '__main__':
     key = binascii.a2b_hex('2331346C6A6B5F215C5D2630553C2728')
     headers = {'X-Real-IP': '211.161.244.70',
                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'}
-    save_path = ''  # 新文件保存地址，为空默认修改原文件
 
     worker()
     # main()
